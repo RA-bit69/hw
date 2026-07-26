@@ -5,23 +5,29 @@ import (
 	"fmt"
 	"net"
 )
+
 type ConnectError string
+
 func (c ConnectError) Error() string {
 	return string(c)
 }
 
-func connectToServer() error{
+func connectToServer() error {
 	conn, err := net.Dial("tcp", ":8080")
+	if err != nil {
+		return err
+	}
 	defer conn.Close()
+
+	connReader := bufio.NewReader(conn)
+	data, err := connReader.ReadString('\n')
 	if err != nil {
 		return err
 	}
 
-	connReader := bufio.NewReader(conn)
-	data, _ := connReader.ReadString('\n')
 	if data != "OK\n" {
 		var connerr error
-		connerr = ConnectError("Connection error")
+		connerr = ConnectError("Wrong response")
 		return connerr
 	}
 	return nil
@@ -29,7 +35,7 @@ func connectToServer() error{
 
 func main() {
 	err := connectToServer()
-	if err != nil{
+	if err != nil {
 		fmt.Println(err)
 		return
 	}
