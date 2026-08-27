@@ -7,9 +7,9 @@ import (
 
 var (
 	data = map[string]models.Crypto{
-		"BTC":  {Symbol: "BTC", Name: "Bitcoin"},
-		"ETH":  {Symbol: "ETH", Name: "Ethereum"},
-		"USDT": {Symbol: "USDT", Name: "Tether"},
+		// "BTC":  {Symbol: "BTC", Name: "Bitcoin"},
+		// "ETH":  {Symbol: "ETH", Name: "Ethereum"},
+		// "USDT": {Symbol: "USDT", Name: "Tether"},
 	}
 	mu sync.RWMutex
 )
@@ -31,10 +31,14 @@ func Get(symbol string) (models.Crypto, bool) {
 	return val, ok
 }
 
-func Set(coin models.Crypto) {
+func Set(coin models.Crypto) bool {
 	mu.Lock()
 	defer mu.Unlock()
+	if _, ok := data[coin.Symbol]; ok {
+		return false
+	}
 	data[coin.Symbol] = coin
+	return true
 }
 
 func Delete(symbol string) bool {
@@ -47,12 +51,17 @@ func Delete(symbol string) bool {
 	return true
 }
 
-func UpdatePrices(symbol string, price float64) {
+func UpdatePrices(symbol string, price float64, timestamp int64) {
 	mu.Lock()
 	defer mu.Unlock()
 	if coin, ok := data[symbol]; ok {
-		coin.Price = price
-		coin.History = append(coin.History, price)
+		coin.CurrentPrice = price
+		coin.LastUpdated = timestamp
+
+		coin.History = append(coin.History, models.PriceRecord{
+			Price: price,
+			Timestamp: timestamp,
+		})
 		if len(coin.History) > 100 {
 			coin.History = coin.History[1:]
 		}
