@@ -2,11 +2,18 @@ package main
 
 import (
 	"cryptoserver/handlers"
+	"cryptoserver/storage"
 	"cryptoserver/updater"
 	"net/http"
 )
 
 func main() {
+	dsn := "postgres://admin:secretpassword@localhost:5433/cryptodb?sslmode=disable"
+	err := storage.InitDB(dsn)
+	if err != nil {
+		panic(err)
+	}
+
 	updater.InitCoinDictionary()
 	go updater.Start()
 

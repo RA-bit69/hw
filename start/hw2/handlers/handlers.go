@@ -72,15 +72,7 @@ func Delete(w http.ResponseWriter, r *http.Request) {
 func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	var creds models.User
 	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
-		return
-	}
-
-	models.UserMutex.RLock()
-	_, exists := models.UserStorage[creds.Username]
-	models.UserMutex.RUnlock()
-
-	if exists {
-		http.Error(w, "Пользователь с таким логином уже существует", http.StatusConflict)
+		http.Error(w, "Неверный формат JSON", http.StatusBadRequest)
 		return
 	}
 
@@ -90,34 +82,35 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	models.UserMutex.Lock()
-	models.UserStorage[creds.Username] = string(hashedPassword)
-	models.UserMutex.Unlock()
+	if ok := storage.SaveUser(creds.Username, string(hashedPassword)); !ok {
+		http.Error(w, "Пользователь с таким логином уже существует", http.StatusConflict)
+		return
+	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"username": creds.Username,
 		"exp":      time.Now().Add(24 * time.Hour).Unix(),
 	})
 	tokenString, _ := token.SignedString(models.JwtKey)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{
 		"message": "Пользователь успешно зарегистрирован",
-		"token":   tokenString, 
+		"token":   tokenString,
 	})
 }
+
 
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	var creds models.User
 	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "Неверный формат JSON", http.StatusBadRequest)
 		return
 	}
 
-	models.UserMutex.RLock()
-	hashedPassword, exists := models.UserStorage[creds.Username]
-	models.UserMutex.RUnlock()
-
+	// Читаем хеш пароля из базы данных
+	hashedPassword, exists := storage.GetUserPasswordHash(creds.Username)
 	if !exists {
 		http.Error(w, "Неверный логин или пароль", http.StatusUnauthorized)
 		return
