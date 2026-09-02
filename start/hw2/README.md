@@ -5,6 +5,7 @@
 ## API
 
 ### Аутентификация
+{
 - **POST /auth/register** - регистрация нового пользователя
   - Body: `{"username": "string", "password": "string"}`
   - Success (201): `{"token": "string"}`
@@ -14,19 +15,21 @@
   - Body: `{"username": "string", "password": "string"}`
   - Success (200): `{"token": "string"}`
   - Error (400/401): `{"error": "string"}`
+}
 
-### CRUD операции для криптовалют
+### CRUD операции для криптовалют 
+{
 Все операции требуют аутентификации через заголовок `Authorization: Bearer <token>`
 
-- **GET /crypto** - получить список всех криптовалют
+||| **GET /crypto** - получить список всех криптовалют
   - Response: `{"cryptos": [{"symbol": "BTC", "name": "Bitcoin", "current_price": 45000.50, "last_updated": "2024-01-01T12:00:00Z"}]}`
 
-- **POST /crypto** - добавить новую криптовалюту для отслеживания
+||| **POST /crypto** - добавить новую криптовалюту для отслеживания
   - Body: `{"symbol": "BTC"}`
   - Success (201): `{"crypto": {...}}`
   - Error (400/409/500): `{"error": "string"}`
 
-- **GET /crypto/{symbol}** - получить информацию о конкретной криптовалюте
+||| **GET /crypto/{symbol}** - получить информацию о конкретной криптовалюте
   - Success (200): `{"symbol": "BTC", "name": "Bitcoin", "current_price": 45000.50, "last_updated": "2024-01-01T12:00:00Z"}`
   - Error (404): `{"error": "string"}`
 
@@ -40,9 +43,10 @@
 - **GET /crypto/{symbol}/stats** - получить статистику по ценам криптовалюты
   - Response: `{"symbol": "BTC", "current_price": 45000.50, "stats": {"min_price": 44000, "max_price": 46000, "avg_price": 45000, "price_change": 1000, "price_change_percent": 2.27, "records_count": 100}}`
 
-- **DELETE /crypto/{symbol}** - удалить криптовалюту из отслеживания (включая историю)
+||| **DELETE /crypto/{symbol}** - удалить криптовалюту из отслеживания (включая историю)
   - Success (200): `{}` (пустой объект)
   - Error (404): `{"error": "string"}`
+}
 
 ## Дополнительная часть ДЗ, расписание автоматического обновления:
 
@@ -67,7 +71,7 @@
 - Используйте JWT токены для аунтефикации
 
 ### CoinGecko API
-
+{
 Для получения всей информации по криптовалютам (включая цены) будет использоваться [CoinGecko API](https://docs.coingecko.com/reference/introduction):
 
 CoinGecko использует уникальные ID вместо символов для идентификации криптовалют:
@@ -76,9 +80,10 @@ CoinGecko использует уникальные ID вместо символ
 - Symbol: `DOGE` → ID: `dogecoin`
 
 На наш сервер криптовалюта при добавлении будет приходить в виде тикера (Symbol в маппинге), поэтому вам нужно умень этот маппинг запрашивать и кешировать (`/coins/list` и `/search` endpoints). Остальные методы ищите в документации ;)
+}
 
 ## Запуск тестов
-
+{
 ### Основные тесты (обязательная часть)
 ```bash
 make test
@@ -89,3 +94,4 @@ make test SCHEDULE=1
 ```
 
 Ваше решение должно содержать файл с сервером: `cryptoserver.{ext}` (`cryptoserver.py`, `cryptoserver.go` и т.д.)
+}
