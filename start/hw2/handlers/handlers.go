@@ -6,6 +6,7 @@ import (
 	"cryptoserver/updater"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -14,76 +15,34 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-func GetList(w http.ResponseWriter, r *http.Request) {
-	response := map[string][]models.Crypto{
-		"cryptos": storage.GetAll(),
-	}
-
+func writeJSONError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
-}
-
-func Create(w http.ResponseWriter, r *http.Request) {
-	var newCoin models.Crypto
-
-	err := json.NewDecoder(r.Body).Decode(&newCoin)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	if ok := storage.Set(newCoin); !ok {
-		http.Error(w, "Криптовалюта уже существует", http.StatusConflict)
-		return 
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-
-	response := map[string]models.Crypto{
-		"crypto": newCoin,
-	}
-	json.NewEncoder(w).Encode(response)
-}
-
-func GetBySymbol(w http.ResponseWriter, r *http.Request) {
-	coinName := r.PathValue("symbol")
-
-	val, ok := storage.Get(coinName)
-	if !ok {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(val)
-
-}
-
-func Delete(w http.ResponseWriter, r *http.Request) {
-	if ok := storage.Delete(r.PathValue("symbol")); !ok {
-		w.WriteHeader(http.StatusNotFound)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{})
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	var creds models.User
 	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
-		http.Error(w, "Неверный формат JSON", http.StatusBadRequest)
+		writeJSONError(w, "Неверный формат JSON", http.StatusBadRequest)
+		return
+	}
+
+	creds.Username = strings.TrimSpace(creds.Username)
+	creds.Password = strings.TrimSpace(creds.Password)
+	if creds.Username == "" || creds.Password == "" {
+		writeJSONError(w, "Имя пользователя и пароль не могут быть пустыми", http.StatusBadRequest)
 		return
 	}
 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(creds.Password), 14)
 	if err != nil {
-		http.Error(w, "Ошибка шифрования", http.StatusInternalServerError)
+		writeJSONError(w, "Ошибка шифрования", http.StatusInternalServerError)
 		return
 	}
 
 	if ok := storage.SaveUser(creds.Username, string(hashedPassword)); !ok {
-		http.Error(w, "Пользователь с таким логином уже существует", http.StatusConflict)
+		writeJSONError(w, "Пользователь с таким логином уже существует", http.StatusConflict)
 		return
 	}
 
@@ -101,24 +60,28 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	var creds models.User
 	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
-		http.Error(w, "Неверный формат JSON", http.StatusBadRequest)
+		writeJSONError(w, "Неверный формат JSON", http.StatusBadRequest)
 		return
 	}
 
-	// Читаем хеш пароля из базы данных
+	creds.Username = strings.TrimSpace(creds.Username)
+	creds.Password = strings.TrimSpace(creds.Password)
+	if creds.Username == "" || creds.Password == "" {
+		writeJSONError(w, "Логин и пароль обязательны", http.StatusBadRequest)
+		return
+	}
+
 	hashedPassword, exists := storage.GetUserPasswordHash(creds.Username)
 	if !exists {
-		http.Error(w, "Неверный логин или пароль", http.StatusUnauthorized)
+		writeJSONError(w, "Неверный логин или пароль", http.StatusUnauthorized)
 		return
 	}
 
-	err := bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(creds.Password))
-	if err != nil {
-		http.Error(w, "Неверный логин или пароль", http.StatusUnauthorized)
+	if err := bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(creds.Password)); err != nil {
+		writeJSONError(w, "Неверный логин или пароль", http.StatusUnauthorized)
 		return
 	}
 
@@ -126,10 +89,9 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		"username": creds.Username,
 		"exp":      time.Now().Add(24 * time.Hour).Unix(),
 	})
-
 	tokenString, err := token.SignedString(models.JwtKey)
 	if err != nil {
-		http.Error(w, "Ошибка генерации токена", http.StatusInternalServerError)
+		writeJSONError(w, "Ошибка генерации токена", http.StatusInternalServerError)
 		return
 	}
 
@@ -139,41 +101,134 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == ""{
-			http.Error(w, "Токен не предоставлен", http.StatusUnauthorized)
-			return
-		}
-
-		parts := strings.Split(authHeader, " ")
-		if len(parts) != 2 || parts[0] != "Bearer" {
-			http.Error(w, "Неверный формат токена", http.StatusUnauthorized)
-			return
-		}
-		tokenString := parts[1]
-
-		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error){
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok{
-				return nil, fmt.Errorf("Неожиданный метод подписи")
-			}
-			return models.JwtKey, nil
-		})
-
-		if err != nil || !token.Valid {
-			http.Error(w, "Неверный или просроченный токен", http.StatusUnauthorized)
-			return
-		}
-
-		next(w, r)
+func Create(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Symbol string `json:"symbol"`
 	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "Неверный формат JSON", http.StatusBadRequest)
+		return
+	}
+
+	symbol := strings.ToUpper(strings.TrimSpace(req.Symbol))
+	if symbol == "" {
+		writeJSONError(w, "Поле symbol обязательно", http.StatusBadRequest)
+		return
+	}
+
+	coinInfo, exists := updater.FindCoin(symbol)
+	if !exists {
+		writeJSONError(w, "Неизвестная криптовалюта", http.StatusBadRequest)
+		return
+	}
+
+	newCoin := models.Crypto{
+		Symbol: symbol,
+		Name:   coinInfo.Name, 
+	}
+
+	if ok := storage.Set(newCoin); !ok {
+		writeJSONError(w, "Криптовалюта уже существует", http.StatusConflict)
+		return
+	}
+
+	_ = updater.RefreshPrice(symbol)
+	savedCoin, _ := storage.Get(symbol)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]models.Crypto{
+		"crypto": savedCoin,
+	})
+}
+
+func Delete(w http.ResponseWriter, r *http.Request) {
+	symbol := strings.ToUpper(r.PathValue("symbol"))
+	if ok := storage.Delete(symbol); !ok {
+		writeJSONError(w, "Криптовалюта не найдена", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Криптовалюта успешно удалена"})
+}
+
+func GetStats(w http.ResponseWriter, r *http.Request) {
+	val, ok := storage.Get(strings.ToUpper(r.PathValue("symbol")))
+	if !ok {
+		writeJSONError(w, "Криптовалюта не найдена", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if len(val.History) == 0 {
+		json.NewEncoder(w).Encode(map[string]any{
+			"symbol":        val.Symbol,
+			"current_price": val.CurrentPrice,
+			"stats":         "Недостаточно данных для статистики",
+		})
+		return
+	}
+
+	minPrice, maxPrice := val.History[0].Price, val.History[0].Price
+	var sum float64
+
+	for _, rec := range val.History {
+		if rec.Price < minPrice {
+			minPrice = rec.Price
+		}
+		if rec.Price > maxPrice {
+			maxPrice = rec.Price
+		}
+		sum += rec.Price
+	}
+
+	firstPrice := val.History[0].Price
+	lastPrice := val.History[len(val.History)-1].Price
+	priceChange := lastPrice - firstPrice
+
+	var changePercent float64
+	if firstPrice != 0 {
+		changePercent = (priceChange / firstPrice) * 100
+	}
+
+	changePercent = math.Round(changePercent*100) / 100
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"symbol":        val.Symbol,
+		"current_price": val.CurrentPrice,
+		"stats": map[string]any{
+			"min_price":            minPrice,
+			"max_price":            maxPrice,
+			"avg_price":            sum / float64(len(val.History)),
+			"price_change":         priceChange,
+			"price_change_percent": changePercent,
+			"records_count":        len(val.History),
+		},
+	})
+}
+
+func GetList(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string][]models.Crypto{"cryptos": storage.GetAll()})
+}
+
+func GetBySymbol(w http.ResponseWriter, r *http.Request) {
+	val, ok := storage.Get(strings.ToUpper(r.PathValue("symbol")))
+	if !ok {
+		writeJSONError(w, "Криптовалюта не найдена", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(val)
 }
 
 func GetHistory(w http.ResponseWriter, r *http.Request) {
-	val, ok := storage.Get(r.PathValue("symbol"))
+	val, ok := storage.Get(strings.ToUpper(r.PathValue("symbol")))
 	if !ok {
-		w.WriteHeader(http.StatusNotFound)
+		writeJSONError(w, "Криптовалюта не найдена", http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -184,53 +239,37 @@ func GetHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 func Refresh(w http.ResponseWriter, r *http.Request) {
-	coinName := r.PathValue("symbol")
-	if err := updater.RefreshPrice(coinName); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	symbol := strings.ToUpper(strings.TrimSpace(r.PathValue("symbol")))
+	if symbol == "" {
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) >= 2 {
+			symbol = strings.ToUpper(parts[1])
+		}
 	}
-	
-	val, _ := storage.Get(coinName)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]models.Crypto{"crypto": val})
-}
 
-func GetStats(w http.ResponseWriter, r *http.Request) {
-	val, ok := storage.Get(r.PathValue("symbol"))
-	if !ok {
-		w.WriteHeader(http.StatusNotFound)
+	if symbol == "" {
+		writeJSONError(w, "Символ криптовалюты не указан", http.StatusBadRequest)
 		return
 	}
 
-	if len(val.History) == 0 {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"symbol":        val.Symbol,
-			"current_price": val.CurrentPrice,
-			"stats":         "Недостаточно данных",
-		})
+	_, exists := storage.Get(symbol)
+	if !exists {
+		writeJSONError(w, "Криптовалюта не найдена", http.StatusNotFound)
 		return
 	}
 
-	min, max := val.History[0].Price, val.History[0].Price
-	var sum float64
-
-	for _, record := range val.History {
-		if record.Price < min { min = record.Price }
-		if record.Price > max { max = record.Price }
-		sum += record.Price
+	if err := updater.RefreshPrice(symbol); err != nil {
+		writeJSONError(w, fmt.Sprintf("Ошибка обновления цены: %v", err), http.StatusBadRequest)
+		return
 	}
+
+	updatedVal, _ := storage.Get(symbol)
 
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]any{
-		"symbol":        val.Symbol,
-		"current_price": val.CurrentPrice,
-		"stats": map[string]any{
-			"min_price":     min,
-			"max_price":     max,
-			"avg_price":     sum / float64(len(val.History)),
-			"records_count": len(val.History),
-		},
+		"message": "Цена успешно обновлена",
+		"crypto":  updatedVal,
 	})
 }
 
@@ -242,15 +281,13 @@ func GetSchedule(w http.ResponseWriter, r *http.Request) {
 func UpdateSchedule(w http.ResponseWriter, r *http.Request) {
 	var settings models.ScheduleSettings
 	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeJSONError(w, "Неверный JSON", http.StatusBadRequest)
 		return
 	}
-	
 	if err := updater.UpdateSchedule(settings); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeJSONError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(settings)
 }
@@ -260,6 +297,36 @@ func TriggerSchedule(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"updated_count": count,
-		"timestamp":     time.Now().Unix(),
+		"timestamp":     time.Now().UTC().Format(time.RFC3339),
 	})
+}
+
+func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			writeJSONError(w, "Токен не предоставлен", http.StatusUnauthorized)
+			return
+		}
+
+		parts := strings.Split(authHeader, " ")
+		if len(parts) != 2 || parts[0] != "Bearer" {
+			writeJSONError(w, "Неверный формат токена", http.StatusUnauthorized)
+			return
+		}
+
+		token, err := jwt.Parse(parts[1], func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("неожиданный метод подписи")
+			}
+			return models.JwtKey, nil
+		})
+
+		if err != nil || !token.Valid {
+			writeJSONError(w, "Неверный или просроченный токен", http.StatusUnauthorized)
+			return
+		}
+
+		next(w, r)
+	}
 }

@@ -33,14 +33,14 @@ func InitDB(dsn string) error {
 		symbol VARCHAR(10) PRIMARY KEY,
 		name TEXT NOT NULL,
 		current_price DOUBLE PRECISION DEFAULT 0,
-		last_updated BIGINT DEFAULT 0
+		last_updated TEXT DEFAULT ''
 	);
 
 	CREATE TABLE IF NOT EXISTS price_history (
 		id SERIAL PRIMARY KEY,
 		symbol VARCHAR(10) REFERENCES cryptos(symbol) ON DELETE CASCADE,
 		price DOUBLE PRECISION NOT NULL,
-		timestamp BIGINT NOT NULL
+		timestamp TEXT NOT NULL
 	);
 	`
 	_, err = db.Exec(query)
@@ -119,10 +119,21 @@ func Delete(symbol string) bool {
 	return rowsAffected > 0
 }
 
-func UpdatePrices(symbol string, price float64, timestamp int64) {
+func UpdatePrices(symbol string, price float64, timestamp string) {
 	db.Exec("UPDATE cryptos SET current_price = $1, last_updated = $2 WHERE symbol = $3", price, timestamp, symbol)
 
 	db.Exec("INSERT INTO price_history (symbol, price, timestamp) VALUES ($1, $2, $3)", symbol, price, timestamp)
+
+	pruneQuery := `
+	DELETE FROM price_history 
+	WHERE id IN (
+		SELECT id FROM price_history 
+		WHERE symbol = $1 
+		ORDER BY id DESC 
+		OFFSET 100
+	);
+	`
+	db.Exec(pruneQuery, symbol)
 }
 
 func SaveUser(username, passwordHash string) bool {

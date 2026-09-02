@@ -5,34 +5,25 @@ import (
 	"cryptoserver/storage"
 	"encoding/json"
 	"fmt"
-	"sync"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
+type CoinInfo struct {
+	ID   string
+	Name string
+}
+
 var (
+	symbolDictionary = make(map[string]CoinInfo)
+	dictMu           sync.RWMutex
+
 	Schedule = models.ScheduleSettings{Enabled: true, IntervalSeconds: 30}
+	lastRun  time.Time
 	schedMu  sync.RWMutex
 )
-
-func GetSchedule() models.ScheduleSettings {
-	schedMu.RLock()
-	defer schedMu.RUnlock()
-	return Schedule
-}
-
-func UpdateSchedule(newSettings models.ScheduleSettings) error {
-	if newSettings.IntervalSeconds < 10 { // Тест требует 400 ошибку для интервала < 10
-		return fmt.Errorf("слишком маленький интервал")
-	}
-	schedMu.Lock()
-	defer schedMu.Unlock()
-	Schedule = newSettings
-	return nil
-}
-
-var symbolToGeckoID = make(map[string]string)
 
 func InitCoinDictionary() {
 	resp, err := http.Get("https://api.coingecko.com/api/v3/coins/list")
@@ -40,70 +31,87 @@ func InitCoinDictionary() {
 		fmt.Println("Ошибка: не удалось скачать справочник", err)
 		return
 	}
-
 	defer resp.Body.Close()
 
 	var coins []models.GeckoCoin
-	err = json.NewDecoder(resp.Body).Decode(&coins)
-	if err != nil {
-		fmt.Println("Ошибка чтения JSON1:", err)
+	if err = json.NewDecoder(resp.Body).Decode(&coins); err != nil {
+		fmt.Println("Ошибка чтения JSON:", err)
 		return
 	}
 
+	dictMu.Lock()
 	for _, coin := range coins {
-		upperSumbol := strings.ToUpper(coin.Symbol)
-		symbolToGeckoID[upperSumbol] = coin.ID
+		upper := strings.ToUpper(coin.Symbol)
+		symbolDictionary[upper] = CoinInfo{
+			ID:   coin.ID,
+			Name: coin.Name,
+		}
 	}
-	fmt.Printf("В словарь загружено %d монет. \n", len(symbolToGeckoID))
+	dictMu.Unlock()
+	fmt.Printf("В словарь загружено %d монет.\n", len(symbolDictionary))
+}
+
+func FindCoin(symbol string) (CoinInfo, bool) {
+	dictMu.RLock()
+	defer dictMu.RUnlock()
+	info, ok := symbolDictionary[strings.ToUpper(symbol)]
+	return info, ok
 }
 
 func fetchPrices() int {
 	var ids []string
-	updatedCount := 0
-
+	dictMu.RLock()
 	for _, coin := range storage.GetAll() {
-
-		if geckoID, exists := symbolToGeckoID[coin.Symbol]; exists {
-			ids = append(ids, geckoID)
+		if info, exists := symbolDictionary[coin.Symbol]; exists {
+			ids = append(ids, info.ID)
 		}
 	}
+	dictMu.RUnlock()
+
 	if len(ids) == 0 {
 		return 0
 	}
 
 	url := fmt.Sprintf("https://api.coingecko.com/api/v3/simple/price?ids=%s&vs_currencies=usd", strings.Join(ids, ","))
-
 	resp, err := http.Get(url)
 	if err != nil {
-		fmt.Println("Ошибка сети:", err)
 		return 0
 	}
 	defer resp.Body.Close()
 
 	priceList := make(map[string]map[string]float64)
-	err = json.NewDecoder(resp.Body).Decode(&priceList)
-	if err != nil {
-		fmt.Println("Ошибка чтение JSON:", err)
+	if err = json.NewDecoder(resp.Body).Decode(&priceList); err != nil {
 		return 0
 	}
 
+	nowISO := time.Now().UTC().Format(time.RFC3339)
+	updatedCount := 0
+
+	dictMu.RLock()
 	for _, coin := range storage.GetAll() {
-		geckoID := symbolToGeckoID[coin.Symbol]
-		if priceData, ok := priceList[geckoID]; ok {
-			storage.UpdatePrices(coin.Symbol, priceData["usd"], time.Now().Unix())
-			updatedCount++
+		if info, ok := symbolDictionary[coin.Symbol]; ok {
+			if priceData, found := priceList[info.ID]; found {
+				storage.UpdatePrices(coin.Symbol, priceData["usd"], nowISO)
+				updatedCount++
+			}
 		}
 	}
+	dictMu.RUnlock()
+
+	schedMu.Lock()
+	lastRun = time.Now().UTC()
+	schedMu.Unlock()
+
 	return updatedCount
 }
 
 func RefreshPrice(symbol string) error {
-	geckoID, ok := symbolToGeckoID[symbol]
+	info, ok := FindCoin(symbol)
 	if !ok {
-		return fmt.Errorf("монета не найдена")
+		return fmt.Errorf("монета не найдена в CoinGecko")
 	}
 
-	url := fmt.Sprintf("https://api.coingecko.com/api/v3/simple/price?ids=%s&vs_currencies=usd", geckoID)
+	url := fmt.Sprintf("https://api.coingecko.com/api/v3/simple/price?ids=%s&vs_currencies=usd", info.ID)
 	resp, err := http.Get(url)
 	if err != nil {
 		return err
@@ -111,15 +119,41 @@ func RefreshPrice(symbol string) error {
 	defer resp.Body.Close()
 
 	priceList := make(map[string]map[string]float64)
-	if err := json.NewDecoder(resp.Body).Decode(&priceList); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&priceList); err != nil {
 		return err
 	}
 
-	if priceData, ok := priceList[geckoID]; ok {
-		storage.UpdatePrices(symbol, priceData["usd"], time.Now().Unix())
+	if priceData, found := priceList[info.ID]; found {
+		nowISO := time.Now().UTC().Format(time.RFC3339)
+		storage.UpdatePrices(symbol, priceData["usd"], nowISO)
 		return nil
 	}
 	return fmt.Errorf("цена не получена")
+}
+
+func GetSchedule() models.ScheduleSettings {
+	schedMu.RLock()
+	defer schedMu.RUnlock()
+
+	s := Schedule
+	if !lastRun.IsZero() {
+		s.LastUpdate = lastRun.Format(time.RFC3339)
+		if s.Enabled {
+			s.NextUpdate = lastRun.Add(time.Duration(s.IntervalSeconds) * time.Second).Format(time.RFC3339)
+		}
+	}
+	return s
+}
+
+func UpdateSchedule(newSettings models.ScheduleSettings) error {
+	if newSettings.IntervalSeconds < 10 {
+		return fmt.Errorf("слишком маленький интервал")
+	}
+	schedMu.Lock()
+	defer schedMu.Unlock()
+	Schedule.Enabled = newSettings.Enabled
+	Schedule.IntervalSeconds = newSettings.IntervalSeconds
+	return nil
 }
 
 func TriggerUpdate() int {
